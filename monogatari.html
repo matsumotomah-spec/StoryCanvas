@@ -107,13 +107,17 @@
   .r-image{height:60%; position:relative; background:#000;}
   .r-image img{width:100%; height:100%;}
   .r-image .zone{position:absolute; top:0; bottom:0;}
+  #r-back{position:absolute; top:max(10px,env(safe-area-inset-top)); left:10px; z-index:5;
+    background:rgba(0,0,0,.55); color:#fff; font-size:15px; padding:8px 14px;
+    border-radius:999px; backdrop-filter:blur(4px);}
+  #r-back:active{background:rgba(0,0,0,.8);}
   .r-text{height:30%; position:relative; padding:16px;}
   .r-textwin{position:absolute; inset:12px; border-radius:14px; padding:16px; overflow:hidden;
     background:rgba(0,0,0,var(--win-opacity,.75));}
   .r-textwin .page{font-size:var(--reader-font,20px); line-height:1.6; color:var(--narration);
     white-space:pre-wrap; word-break:normal;}
   .r-text .ztap{position:absolute; top:0; bottom:0;}
-  .speaker-label{font-size:.8em; opacity:.85; margin-right:.15em;}
+  .speaker-label{font-size:.82em; opacity:.9; font-weight:600; letter-spacing:.02em;}
   .r-ui{height:10%; display:flex; align-items:center; justify-content:space-between;
     padding:0 16px; color:var(--muted); opacity:0; transition:opacity .2s; pointer-events:none;}
   .r-ui.show{opacity:1; pointer-events:auto;}
@@ -198,6 +202,7 @@
     <h1>キャラクター設定</h1>
   </div>
   <div class="scroll" id="char-list"></div>
+  <button class="fab" id="ch-done">決定</button>
 </div>
 
 <!-- ============ シーン編集 ============ -->
@@ -276,6 +281,7 @@
     <div class="zone" id="r-prev" style="left:0; width:20%;"></div>
     <div class="zone" id="r-zoom" style="left:20%; width:60%;"></div>
     <div class="zone" id="r-next" style="left:80%; width:20%;"></div>
+    <button id="r-back" title="一覧に戻る">‹ 一覧</button>
   </div>
   <div class="r-text" id="r-text">
     <div class="r-textwin"><div class="page" id="r-page"></div></div>
@@ -405,7 +411,8 @@ function gcImages(){
    ========================================================= */
 const Paginator = {
   measureEl:null,
-  // blocks -> [{ch, speakerId, blockBreak}]
+  nameOf:()=>'',   // 話者ID -> 名前（呼び出し側が設定）。地の文(null)は空。
+  // blocks -> [{ch, sp, brk}]
   flatten(blocks){
     const out=[];
     blocks.forEach((b,bi)=>{
@@ -415,19 +422,37 @@ const Paginator = {
     });
     return out;
   },
-  // 計測要素に n 文字入れて高さが maxH 以内か
+  // start から end までを、各話者ブロックの先頭に「名前＋改行」を補った
+  // 計測用文字列に組み立てる。表示と同じ高さになるようにする。
+  buildMeasureText(chars, start, end){
+    let s='';
+    let curSp=undefined;
+    for(let i=start;i<end;i++){
+      const c=chars[i];
+      if(c.brk) continue;
+      if(c.sp!==curSp){
+        const name=this.nameOf(c.sp);
+        if(name){
+          // 直前が行頭でなければ改行してから名前行を始める
+          if(s.length && !s.endsWith('\n')) s+='\n';
+          s+=name+'\n';
+        }
+        curSp=c.sp;
+      }
+      s+=c.ch;
+    }
+    return s;
+  },
   fits(chars, start, end, areaW, fontPx){
     const el=this.measureEl;
     el.style.width=areaW+'px';
     el.style.fontSize=fontPx+'px';
     el.style.lineHeight='1.6';
-    let s='';
-    for(let i=start;i<end;i++){ if(!chars[i].brk) s+=chars[i].ch; }
+    const s=this.buildMeasureText(chars,start,end);
     el.textContent=s.length?s:' ';
     return el.offsetHeight;
   },
   maxFit(chars, start, areaW, areaH, fontPx){
-    // 二分探索: start..len で高さ<=areaH の最大 end
     let lo=start+1, hi=chars.length, fit=start+1;
     while(lo<=hi){
       const mid=(lo+hi)>>1;
@@ -557,7 +582,8 @@ function storyMenu(st){
     <div class="menu-item" data-a="edit">編集</div>
     <div class="menu-item" data-a="rename">名前を変更</div>
     <div class="menu-item" data-a="dup">複製</div>
-    <div class="menu-item" data-a="export">この作品だけ書き出す</div>
+    <div class="menu-item" data-a="viewer">読むためのファイルを書き出す（HTML）</div>
+    <div class="menu-item" data-a="export">バックアップを書き出す（復元用）</div>
     <div class="menu-item danger" data-a="del">削除</div>`);
   $('#sheet h3').textContent=st.title;
   $('#sheet').querySelectorAll('.menu-item').forEach(el=>el.onclick=()=>{
@@ -565,6 +591,7 @@ function storyMenu(st){
     if(a==='edit') openEditor(st);
     if(a==='rename') promptText({title:'タイトル',value:st.title,onOk:v=>{ if(v){st.title=v; touch(st); renderLibrary();}}});
     if(a==='dup') duplicateStory(st);
+    if(a==='viewer') exportViewer(st);
     if(a==='export') exportSingle(st);
     if(a==='del') confirmDelete(st);
   });
@@ -748,7 +775,8 @@ function sceneCharCount(){ return curScene.blocks.reduce((n,b)=>n+Array.from(b.t
 function updateCounts(){
   const n=sceneCharCount();
   const cc=$('#sc-charcount'); cc.textContent=`${n} / ${MAX_SCENE}`; cc.classList.toggle('over',n>MAX_SCENE);
-  // 概算ページ数（標準的な領域で計算）
+  // 概算ページ数（標準的な領域で計算）。名前ラベルも高さに含める。
+  Paginator.nameOf=id=>id?(curStory.characters.find(c=>c.id===id)?.name||''):'';
   const pages=Paginator.paginate(curScene.blocks, 320, 200, 20);
   $('#sc-pagecount').textContent=`全 ${pages.length} ページ（概算）`;
 }
@@ -780,6 +808,8 @@ function measureReader(){
 }
 function repaginate(){
   const sc=R.story.scenes[R.sceneIdx];
+  // 名前ラベル＋改行を高さ計測に含める
+  Paginator.nameOf=id=>id?(R.story.characters.find(c=>c.id===id)?.name||''):'';
   R.pages=Paginator.paginate(sc.blocks, R.areaW, R.areaH, settings.font);
   if(R.pageIdx>R.pages.length-1) R.pageIdx=R.pages.length-1;
   if(R.pageIdx<0) R.pageIdx=0;
@@ -796,20 +826,29 @@ function renderReaderPage(){
   if(img){ imgEl.src=img; imgEl.style.objectFit=R.story.settings.imageMode==='fill'?'cover':'contain'; imgEl.style.opacity=1; }
   else { imgEl.removeAttribute('src'); imgEl.style.opacity=0; }
   const runs=R.pages[R.pageIdx]||[];
-  // 話者ラベル: ページ先頭ブロック、または話者が変わった最初のrunにキャラ名を付ける
+  // 毎ページ、各話者ブロックの先頭で「名前＋改行＋セリフ」を出す。地の文は名前なし。
   const page=$('#r-page'); page.innerHTML='';
   let prevSp=undefined;
-  runs.forEach((run,idx)=>{
-    const span=document.createElement('span');
-    span.style.color=colorFor(run.sp);
-    // セリフの先頭ブロック（話者あり & 直前と話者が異なる）にラベル
-    if(run.sp && run.sp!==prevSp){
+  let lastCharNL=true;   // 直前に出力した文字が改行 or 何も無いか
+  runs.forEach((run)=>{
+    const color=colorFor(run.sp);
+    if(run.sp!==prevSp){
       const name=R.story.characters.find(c=>c.id===run.sp)?.name;
-      if(name){ const lbl=document.createElement('span'); lbl.className='speaker-label';
-        lbl.style.color=colorFor(run.sp); lbl.textContent=name; span.appendChild(lbl); }
+      if(run.sp && name){
+        const lbl=document.createElement('span');
+        lbl.className='speaker-label';
+        lbl.style.color=color;
+        // 直前が行頭でなければ改行を足してから名前行
+        lbl.textContent=(lastCharNL?'':'\n')+name+'\n';
+        page.appendChild(lbl);
+        lastCharNL=true;
+      }
     }
+    const span=document.createElement('span');
+    span.style.color=color;
     span.appendChild(document.createTextNode(run.text));
     page.appendChild(span);
+    if(run.text.length) lastCharNL=(run.text[run.text.length-1]==='\n');
     prevSp=run.sp;
   });
   $('#r-pos').textContent=`Scene ${R.sceneIdx+1}/${R.story.scenes.length}　Page ${R.pageIdx+1}/${R.pages.length}`;
@@ -817,6 +856,17 @@ function renderReaderPage(){
 function readerNext(){
   if(R.pageIdx<R.pages.length-1){ R.pageIdx++; renderReaderPage(); }
   else if(R.sceneIdx<R.story.scenes.length-1){ R.sceneIdx++; R.pageIdx=0; repaginate(); renderReaderPage(); }
+  else { confirmEndReader(); }  // 最終Sceneの最終ページで進もうとした
+}
+function confirmEndReader(){
+  openSheet(`<h3>最後のページです</h3>
+    <p style="margin:0 0 16px;color:var(--muted);font-size:14px;line-height:1.6;">作品一覧に戻りますか？</p>
+    <div class="actions">
+      <button class="btn-ghost" id="end-stay">読み続ける</button>
+      <button class="btn-primary" id="end-go">一覧に戻る</button>
+    </div>`);
+  $('#end-stay').onclick=closeSheet;
+  $('#end-go').onclick=()=>{ closeSheet(); closeReader(); };
 }
 function readerPrev(){
   if(R.pageIdx>0){ R.pageIdx--; renderReaderPage(); }
@@ -833,15 +883,15 @@ function applyZoom(){ $('#zoom-img').style.transform=`translate(${Z.x}px,${Z.y}p
 /* =========================================================
    エクスポート / インポート
    ========================================================= */
-function download(filename, text){
-  const blob=new Blob([text],{type:'application/json'});
+function download(filename, text, mime='application/json'){
+  const blob=new Blob([text],{type:mime});
   const url=URL.createObjectURL(blob);
   const a=document.createElement('a'); a.href=url; a.download=filename;
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(()=>URL.revokeObjectURL(url),1000);
   // iOS Safari 共有用にも対応
   if(navigator.canShare){
-    try{ const file=new File([blob],filename,{type:'application/json'});
+    try{ const file=new File([blob],filename,{type:mime});
       if(navigator.canShare({files:[file]})) navigator.share({files:[file]}).catch(()=>{}); }catch(e){}
   }
 }
@@ -858,6 +908,192 @@ function exportSingle(st){
   download(`${st.title.replace(/[^\w\u3040-\u30ff\u4e00-\u9faf]/g,'_')}.json`, JSON.stringify(sub));
   toast('書き出しました');
 }
+
+/* ---------- 単体HTMLビューア書き出し（読み専用・画像埋め込み） ---------- */
+const VIEWER_TEMPLATE = `<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>__TITLE__</title>
+<style>
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;margin:0;}
+  html,body{height:100%;background:#000;overflow:hidden;
+    font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Helvetica Neue",sans-serif;}
+  #reader{position:fixed;inset:0;display:flex;flex-direction:column;background:#000;}
+  .r-image{height:60%;position:relative;background:#000;}
+  .r-image img{width:100%;height:100%;}
+  .zone{position:absolute;top:0;bottom:0;}
+  .r-text{height:30%;position:relative;padding:16px;}
+  .r-textwin{position:absolute;inset:12px;border-radius:14px;padding:16px;overflow:hidden;
+    background:rgba(0,0,0,var(--win,.75));}
+  .page{font-size:var(--font,20px);line-height:1.6;color:#fff;white-space:pre-wrap;word-break:normal;}
+  .ztap{position:absolute;top:0;bottom:0;}
+  .speaker-label{font-size:.82em;opacity:.9;font-weight:600;letter-spacing:.02em;}
+  .r-ui{height:10%;display:flex;align-items:center;justify-content:space-between;padding:0 16px;
+    color:#9aa0b0;opacity:0;transition:opacity .2s;pointer-events:none;}
+  .r-ui.show{opacity:1;pointer-events:auto;}
+  .r-ui .pos{font-size:13px;}
+  #zoom{position:fixed;inset:0;background:#000;z-index:60;display:none;align-items:center;justify-content:center;overflow:hidden;}
+  #zoom.show{display:flex;}
+  #zoom img{max-width:100%;max-height:100%;transform-origin:center;}
+  #measure{position:fixed;visibility:hidden;left:-9999px;top:0;white-space:pre-wrap;word-break:normal;}
+  .end{position:fixed;inset:0;display:none;align-items:center;justify-content:center;flex-direction:column;
+    background:rgba(0,0,0,.85);z-index:70;color:#fff;gap:18px;}
+  .end.show{display:flex;}
+  .end button{background:#7c8cff;color:#fff;border:none;border-radius:12px;padding:12px 28px;font-size:16px;}
+</style>
+</head>
+<body>
+<div id="reader">
+  <div class="r-image" id="r-image">
+    <img id="r-img" alt="">
+    <div class="zone" id="r-prev" style="left:0;width:20%;"></div>
+    <div class="zone" id="r-zoom" style="left:20%;width:60%;"></div>
+    <div class="zone" id="r-next" style="left:80%;width:20%;"></div>
+  </div>
+  <div class="r-text">
+    <div class="r-textwin"><div class="page" id="r-page"></div></div>
+    <div class="ztap" id="rt-prev" style="left:0;width:20%;"></div>
+    <div class="ztap" id="rt-next" style="left:20%;width:80%;"></div>
+  </div>
+  <div class="r-ui" id="r-ui"><span class="pos" id="r-pos"></span></div>
+</div>
+<div id="zoom"><img id="zoom-img" alt=""></div>
+<div id="measure"></div>
+<div class="end" id="end">
+  <div>おわり</div>
+  <button id="end-restart">最初から読む</button>
+</div>
+
+<script id="story-data" type="application/json">__DATA__<\/script>
+<script>
+"use strict";
+const COLOR_SLOTS={pink:'#ff6fb5',blue:'#4fc3f7',yellow:'#ffd54f'};
+const HEAD_FORBIDDEN=new Set(Array.from("、。，．）」』】］｝〉》〕｣・：；ー々〜？！ぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮ"));
+const END_FORBIDDEN=new Set(Array.from("（「『【［｛〈《〔｢"));
+const $=s=>document.querySelector(s);
+
+const DATA=JSON.parse(document.getElementById('story-data').textContent);
+const story=DATA.story, images=DATA.images;
+const FONT=DATA.font||20, OPACITY=(DATA.opacity!=null?DATA.opacity:75)/100;
+document.documentElement.style.setProperty('--font',FONT+'px');
+document.documentElement.style.setProperty('--win',OPACITY);
+
+const Paginator={
+  measureEl:null, nameOf:()=>'',
+  flatten(blocks){const out=[];blocks.forEach((b,bi)=>{
+    for(const ch of Array.from(b.text||'')) out.push({ch,sp:b.speakerId??null});
+    if(bi<blocks.length-1) out.push({ch:'',sp:b.speakerId??null,brk:true});});return out;},
+  buildMeasureText(chars,start,end){let s='',curSp=undefined;
+    for(let i=start;i<end;i++){const c=chars[i];if(c.brk)continue;
+      if(c.sp!==curSp){const name=this.nameOf(c.sp);
+        if(name){if(s.length&&!s.endsWith('\\n'))s+='\\n';s+=name+'\\n';}curSp=c.sp;}
+      s+=c.ch;}return s;},
+  fits(chars,start,end,areaW,fontPx){const el=this.measureEl;
+    el.style.width=areaW+'px';el.style.fontSize=fontPx+'px';el.style.lineHeight='1.6';
+    const s=this.buildMeasureText(chars,start,end);el.textContent=s.length?s:' ';return el.offsetHeight;},
+  maxFit(chars,start,areaW,areaH,fontPx){let lo=start+1,hi=chars.length,fit=start+1;
+    while(lo<=hi){const mid=(lo+hi)>>1;if(this.fits(chars,start,mid,areaW,fontPx)<=areaH){fit=mid;lo=mid+1;}else hi=mid-1;}return fit;},
+  adjust(chars,cut){let c=cut,g=0;while(c>1&&c<chars.length&&g<64){g++;
+    if(HEAD_FORBIDDEN.has(chars[c].ch)){c--;continue;}
+    if(END_FORBIDDEN.has(chars[c-1].ch)){c--;continue;}
+    if((chars[c-1].ch==='…'&&chars[c].ch==='…')||(chars[c-1].ch==='—'&&chars[c].ch==='—')){c--;continue;}
+    break;}return c;},
+  findBreak(chars,start,hardEnd){if(hardEnd>=chars.length)return chars.length;
+    for(let i=hardEnd-1;i>start;i--)if(chars[i].brk)return i+1;
+    for(let i=hardEnd-1;i>start;i--)if(chars[i].ch==='\\n')return i+1;
+    for(let i=hardEnd-1;i>start;i--)if('、。，．'.includes(chars[i].ch))return this.adjust(chars,i+1);
+    for(let i=hardEnd-1;i>start;i--)if(chars[i].ch===' '||chars[i].ch==='　')return this.adjust(chars,i+1);
+    return this.adjust(chars,hardEnd);},
+  paginate(blocks,areaW,areaH,fontPx){if(!this.measureEl)this.measureEl=$('#measure');
+    const chars=this.flatten(blocks);if(chars.length===0)return[[]];
+    const pages=[];let pos=0,guard=0;
+    while(pos<chars.length&&guard<=chars.length+2){guard++;
+      const hard=this.maxFit(chars,pos,areaW,areaH,fontPx);
+      let next=this.findBreak(chars,pos,hard);if(next<=pos)next=Math.min(pos+1,chars.length);
+      const runs=[];for(let i=pos;i<next;i++){const c=chars[i];if(c.brk)continue;
+        const last=runs[runs.length-1];
+        if(last&&last.sp===c.sp)last.text+=c.ch;else runs.push({sp:c.sp,text:c.ch});}
+      pages.push(runs);pos=next;}return pages;}
+};
+
+let R={sceneIdx:0,pageIdx:0,pages:[],areaW:0,areaH:0};
+function colorFor(spId){if(!spId)return'#ffffff';
+  const ch=story.characters.find(c=>c.id===spId);return ch?COLOR_SLOTS[ch.colorSlot]:'#ffffff';}
+function measure(){const win=$('.r-textwin');R.areaW=win.clientWidth-32;R.areaH=win.clientHeight-32;}
+function repaginate(){const sc=story.scenes[R.sceneIdx];
+  Paginator.nameOf=id=>id?(story.characters.find(c=>c.id===id)?.name||''):'';
+  R.pages=Paginator.paginate(sc.blocks,R.areaW,R.areaH,FONT);
+  if(R.pageIdx>R.pages.length-1)R.pageIdx=R.pages.length-1;if(R.pageIdx<0)R.pageIdx=0;}
+function render(){const sc=story.scenes[R.sceneIdx];
+  const img=sc.imageId&&images[sc.imageId];const imgEl=$('#r-img');
+  if(img){imgEl.src=img;imgEl.style.objectFit=story.settings.imageMode==='fill'?'cover':'contain';imgEl.style.opacity=1;}
+  else{imgEl.removeAttribute('src');imgEl.style.opacity=0;}
+  const runs=R.pages[R.pageIdx]||[];const page=$('#r-page');page.innerHTML='';
+  let prevSp=undefined,lastNL=true;
+  runs.forEach(run=>{const color=colorFor(run.sp);
+    if(run.sp!==prevSp){const name=story.characters.find(c=>c.id===run.sp)?.name;
+      if(run.sp&&name){const lbl=document.createElement('span');lbl.className='speaker-label';
+        lbl.style.color=color;lbl.textContent=(lastNL?'':'\\n')+name+'\\n';page.appendChild(lbl);lastNL=true;}}
+    const span=document.createElement('span');span.style.color=color;
+    span.appendChild(document.createTextNode(run.text));page.appendChild(span);
+    if(run.text.length)lastNL=(run.text[run.text.length-1]==='\\n');prevSp=run.sp;});
+  $('#r-pos').textContent=\`Scene \${R.sceneIdx+1}/\${story.scenes.length}　Page \${R.pageIdx+1}/\${R.pages.length}\`;}
+function next(){if(R.pageIdx<R.pages.length-1){R.pageIdx++;render();}
+  else if(R.sceneIdx<story.scenes.length-1){R.sceneIdx++;R.pageIdx=0;repaginate();render();}
+  else{$('#end').classList.add('show');}}
+function prev(){if(R.pageIdx>0){R.pageIdx--;render();}
+  else if(R.sceneIdx>0){R.sceneIdx--;repaginate();R.pageIdx=R.pages.length-1;render();}}
+
+// 画像拡大
+let Z={scale:1,x:0,y:0,sx:0,sy:0,dist:0,base:1};
+function openZoom(src){if(!src)return;$('#zoom-img').src=src;$('#zoom').classList.add('show');
+  Z={scale:1,x:0,y:0,sx:0,sy:0,dist:0,base:1};applyZoom();}
+function applyZoom(){$('#zoom-img').style.transform=\`translate(\${Z.x}px,\${Z.y}px) scale(\${Z.scale})\`;}
+function tdist(e){const dx=e.touches[0].clientX-e.touches[1].clientX,dy=e.touches[0].clientY-e.touches[1].clientY;return Math.hypot(dx,dy);}
+
+function bind(){
+  $('#r-next').onclick=next;$('#rt-next').onclick=next;
+  $('#r-prev').onclick=prev;$('#rt-prev').onclick=prev;
+  let lastTap=0;
+  $('#r-zoom').onclick=()=>{const now=Date.now();
+    if(now-lastTap<300){const sc=story.scenes[R.sceneIdx];openZoom(sc.imageId&&images[sc.imageId]);}lastTap=now;};
+  let pt=null;
+  $('#reader').addEventListener('touchstart',()=>{pt=setTimeout(()=>$('#r-ui').classList.toggle('show'),500);});
+  $('#reader').addEventListener('touchend',()=>clearTimeout(pt));
+  $('#reader').addEventListener('touchmove',()=>clearTimeout(pt));
+  $('#zoom').addEventListener('click',e=>{if(e.target.id==='zoom-img')return;$('#zoom').classList.remove('show');});
+  const zi=$('#zoom-img');
+  zi.addEventListener('touchstart',e=>{if(e.touches.length===2){Z.dist=tdist(e);Z.base=Z.scale;}
+    else if(e.touches.length===1){Z.sx=e.touches[0].clientX-Z.x;Z.sy=e.touches[0].clientY-Z.y;}},{passive:false});
+  zi.addEventListener('touchmove',e=>{e.preventDefault();
+    if(e.touches.length===2){const d=tdist(e);Z.scale=Math.max(1,Math.min(4,Z.base*d/Z.dist));applyZoom();}
+    else if(e.touches.length===1&&Z.scale>1){Z.x=e.touches[0].clientX-Z.sx;Z.y=e.touches[0].clientY-Z.sy;applyZoom();}},{passive:false});
+  let zl=0;zi.addEventListener('click',()=>{const now=Date.now();
+    if(now-zl<300){if(Z.scale>1){Z.scale=1;Z.x=0;Z.y=0;}else Z.scale=2;applyZoom();}zl=now;});
+  $('#end-restart').onclick=()=>{R.sceneIdx=0;R.pageIdx=0;$('#end').classList.remove('show');repaginate();render();};
+  window.addEventListener('resize',()=>{measure();repaginate();render();});
+}
+requestAnimationFrame(()=>{measure();repaginate();render();bind();});
+<\/script>
+</body>
+</html>
+`;
+function exportViewer(st){
+  const used=new Set([st.coverImageId, ...st.scenes.map(s=>s.imageId)].filter(Boolean));
+  const imgs={}; for(const id of used) if(library.images[id]) imgs[id]=library.images[id];
+  const data={ story:JSON.parse(JSON.stringify(st)), images:imgs, font:settings.font, opacity:settings.opacity };
+  const safeTitle=(st.title||'無題').replace(/[<>:"/\\|?*]/g,'_');
+  let html=VIEWER_TEMPLATE
+    .replace('__TITLE__', escapeHtml(st.title||'無題'))
+    .replace('__DATA__', JSON.stringify(data).replace(/<\/script>/g,'<\\/script>'));
+  download(safeTitle+'.html', html, 'text/html');
+  toast('ビューアを書き出しました');
+}
+function escapeHtml(s){ return s.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
 function importFromFile(file){
   const reader=new FileReader();
   reader.onload=()=>{
@@ -955,7 +1191,8 @@ function bindEvents(){
   $('#ed-chars').onclick=()=>{ charReturnsToEditor=true; openChars(curStory); };
 
   // キャラ
-  $('#ch-back').onclick=()=>{ if(charReturnsToEditor==='editor'){ openEditor(curStory);} else { openEditor(curStory);} };
+  $('#ch-back').onclick=()=>{ openEditor(curStory); };
+  $('#ch-done').onclick=()=>{ openEditor(curStory); };
 
   // シーン編集
   $('#sc-back').onclick=()=>{ renderScenes(); show('editor'); };
@@ -975,6 +1212,7 @@ function bindEvents(){
 
   // 閲覧
   $('#r-close').onclick=closeReader;
+  $('#r-back').onclick=closeReader;
   $('#r-next').onclick=readerNext; $('#rt-next').onclick=readerNext;
   $('#r-prev').onclick=readerPrev; $('#rt-prev').onclick=readerPrev;
   let lastTap=0;
